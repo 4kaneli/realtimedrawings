@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <title>Schermo di Disegno Condiviso (Firebase Realtime)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+
+    #bg-blur {
+      position: absolute;
+      inset: -50px;
+      z-index: 1;
+      filter: blur(100px);
+      background: linear-gradient(45deg, #010b14, #000000, #000000, #000000);
+      background-size: 400% 400%;
+      animation: gradientShift 30s ease infinite alternate;
+      opacity: 0.7;
+    }
+    @keyframes gradientShift {
+      0% { background-position: 0% 50%; filter: blur(100px) hue-rotate(0deg); }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; filter: blur(120px) hue-rotate(120deg); }
+    }
+
+    .wall-layer {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+    #cache-canvas { z-index: 2; }
+    #live-canvas { z-index: 3; }
+
+    #conn-status {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 10;
+      font-family: system-ui, sans-serif;
+      font-size: 12px;
+      color: #39ff14;
+      opacity: 0.6;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="bg-blur"></div>
+  <canvas id="cache-canvas" class="wall-layer"></canvas>
+  <canvas id="live-canvas" class="wall-layer"></canvas>
+  <div id="conn-status">Connessione a Firebase...</div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-analytics.js";
+    import {
+      getDatabase, ref, onChildAdded, onChildRemoved,
+      query, orderByChild, limitToLast
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+    // ---- CONFIGURAZIONE FIREBASE ----
+    const firebaseConfig = {
+      apiKey: "AIzaSyCto1Pr0e-08sur96xlRPtxdQ5zrH0UdGk",
+      authDomain: "drawing-toge.firebaseapp.com",
+      databaseURL: "https://drawing-toge-default-rtdb.europe-west1.firebasedatabase.app/", // es: https://drawing-toge-default-rtdb.europe-west1.firebasedatabase.app
+      projectId: "drawing-toge",
+      storageBucket: "drawing-toge.firebasestorage.app",
+      messagingSenderId: "519446510773",
+      appId: "1:519446510773:web:86387ee1644b60094152fc",
+      measurementId: "G-VBD2GWV4FD"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    try { getAnalytics(app); } catch (e) { /* analytics non essenziale */ }
+    const db = getDatabase(app);
+
+    const statusEl = document.getElementById("conn-status");
+
+    // Livelli canvas
+    const cacheCanvas = document.getElementById("cache-canvas");
+    const cacheCtx = cacheCanvas.getContext("2d", { alpha: true });
+
+    const liveCanvas = document.getElementById("live-canvas");
+    const liveCtx = liveCanvas.getContext("2d", { alpha: true });
+
+    let completedStrokes = []; // array ordinato, max 8, ognuno {key, color, size, style, points}
+    let activeStrokes = {};    // { strokeId: {color, size, style, points:[]} }
+    let activePointUnsubs = {}; // per staccare i listener dei punti quando lo stroke finisce
+    let totalStrokesCount = 0;
+
+    function resize() {
+      cacheCanvas.width = liveCanvas.width = window.innerWidth;
+      cacheCanvas.height = liveCanvas.height = window.innerHeight;
+      redrawCache();
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // ---------------- MOTORE GRAFICO (identico a prima) ----------------
+    function renderStroke(ctx, stroke, canvasW, canvasH) {
+      if (!stroke || !stroke.points || stroke.points.length === 0) return;
+
+      ctx.save();
+      const pts = stroke.points;
+      const color = stroke.color;
+      const size = stroke.size;
+      const style = stroke.style;
+
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = size;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+
+      if (style === "liscio") {
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x * canvasW, pts[0].y * canvasH);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x * canvasW, pts[i].y * canvasH);
+        ctx.stroke();
+      }
+      else if (style === "blur") {
+        ctx.shadowBlur = size;
+        ctx.shadowColor = color;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x * canvasW, pts[0].y * canvasH);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x * canvasW, pts[i].y * canvasH);
+        ctx.stroke();
+      }
+      else if (style === "acquerello") {
+        ctx.globalAlpha = 0.18;
+        for (let j = 0; j < 3; j++) {
+          ctx.lineWidth = size * (1 + j * 0.3);
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x * canvasW, pts[0].y * canvasH);
+          for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x * canvasW + (Math.random() - 0.5) * 3, pts[i].y * canvasH + (Math.random() - 0.5) * 3);
+          }
+          ctx.stroke();
+        }
+      }
+      else if (style === "spray") {
+        ctx.lineWidth = size * 0.25;
+        ctx.globalAlpha = 0.3;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x * canvasW, pts[0].y * canvasH);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x * canvasW, pts[i].y * canvasH);
+        ctx.stroke();
+
+        ctx.globalAlpha = 0.8;
+        for (const p of pts) {
+          const x = p.x * canvasW;
+          const y = p.y * canvasH;
+          const density = Math.round(5 + size * 0.15);
+          for (let i = 0; i < density; i++) {
+            const ang = Math.random() * Math.PI * 2;
+            const rad = Math.pow(Math.random(), 2) * (size * 0.4);
+            const px = x + Math.cos(ang) * rad;
+            const py = y + Math.sin(ang) * rad;
+            ctx.fillRect(px, py, 1.5, 1.5);
+          }
+        }
+      }
+      ctx.restore();
+    }
+
+    function redrawCache() {
+      cacheCtx.clearRect(0, 0, cacheCanvas.width, cacheCanvas.height);
+      for (const stroke of completedStrokes) {
+        renderStroke(cacheCtx, stroke, cacheCanvas.width, cacheCanvas.height);
+      }
+    }
+
+    function redrawLive() {
+      liveCtx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
+      for (const id in activeStrokes) {
+        renderStroke(liveCtx, activeStrokes[id], liveCanvas.width, liveCanvas.height);
+      }
+    }
+
+    function takeAutomaticScreenshot() {
+      const link = document.createElement("a");
+      link.download = `ricordo_evento_${totalStrokesCount}.png`;
+
+      const tempCanvas = document.createElement("canvas");
+      tempCanvas.width = cacheCanvas.width;
+      tempCanvas.height = cacheCanvas.height;
+      const tCtx = tempCanvas.getContext("2d");
+
+      tCtx.fillStyle = "#010810";
+      tCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+      tCtx.drawImage(cacheCanvas, 0, 0);
+      tCtx.drawImage(liveCanvas, 0, 0);
+
+      link.href = tempCanvas.toDataURL("image/png");
+      link.click();
+    }
+
+    // ---------------- LISTENER FIREBASE: STROKE ATTIVI (live, multi-utente) ----------------
+    const activeRef = ref(db, "strokes/active");
+
+    onChildAdded(activeRef, (snapshot) => {
+      const strokeId = snapshot.key;
+      const data = snapshot.val() || {};
+
+      activeStrokes[strokeId] = {
+        color: data.color,
+        size: data.size,
+        style: data.style,
+        points: []
+      };
+
+      // Ascolta i punti di QUESTO specifico stroke in tempo reale
+      const pointsRef = ref(db, `strokes/active/${strokeId}/points`);
+      const unsub = onChildAdded(pointsRef, (ptSnap) => {
+        if (activeStrokes[strokeId]) {
+          activeStrokes[strokeId].points.push(ptSnap.val());
+          redrawLive();
+        }
+      });
+      activePointUnsubs[strokeId] = unsub;
+    });
+
+    onChildRemoved(activeRef, (snapshot) => {
+      const strokeId = snapshot.key;
+      // Stacca il listener dei punti per evitare memory leak
+      if (activePointUnsubs[strokeId]) {
+        activePointUnsubs[strokeId](); // onChildAdded ritorna una funzione di unsubscribe
+        delete activePointUnsubs[strokeId];
+      }
+      delete activeStrokes[strokeId];
+      redrawLive();
+    });
+
+    // ---------------- LISTENER FIREBASE: STROKE COMPLETATI (max 8, tutti gli schermi) ----------------
+    const completedQuery = query(ref(db, "strokes/completed"), orderByChild("timestamp"), limitToLast(8));
+    const seenKeys = new Set();
+
+    onChildAdded(completedQuery, (snapshot) => {
+      const key = snapshot.key;
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
+
+      const data = snapshot.val();
+      completedStrokes.push({ key, ...data });
+      totalStrokesCount++;
+
+      if (completedStrokes.length > 8) {
+        const removed = completedStrokes.shift();
+        seenKeys.delete(removed.key);
+      }
+
+      redrawCache();
+
+      if (totalStrokesCount % 10 === 0) {
+        setTimeout(takeAutomaticScreenshot, 200);
+      }
+    });
+
+    statusEl.textContent = "Connesso a Firebase — in ascolto";
+    setTimeout(() => { statusEl.style.opacity = "0"; statusEl.style.transition = "opacity 1s"; }, 3000);
+  </script>
+</body>
+</html>
