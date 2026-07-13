@@ -1,202 +1,185 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Schermo di Disegno Condiviso (Firebase Realtime)</title>
+  <title>Shared Drawing Wall</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-
-    #bg-blur {
-      position: absolute;
-      inset: -50px;
-      z-index: 1;
-      filter: blur(100px);
-      background: linear-gradient(45deg, #010b14, #000000, #000000, #000000);
-      background-size: 400% 400%;
-      animation: gradientShift 30s ease infinite alternate;
-      opacity: 0.7;
+    html, body { 
+      width: 100%; 
+      height: 100%; 
+      overflow: hidden; 
+      background: url('6385.jpg') center center / cover no-repeat fixed;
     }
-    @keyframes gradientShift {
-      0% { background-position: 0% 50%; filter: blur(100px) hue-rotate(0deg); }
-      50% { background-position: 100% 50%; }
-      100% { background-position: 0% 50%; filter: blur(120px) hue-rotate(120deg); }
-    }
-
-    .wall-layer {
+    #live-canvas {
       position: absolute;
       inset: 0;
       width: 100%;
       height: 100%;
+      z-index: 2;
     }
-    #cache-canvas { z-index: 2; }
-    #live-canvas { z-index: 3; }
-
     #conn-status {
       position: absolute;
       top: 10px;
       left: 10px;
       z-index: 10;
       font-family: system-ui, sans-serif;
-      font-size: 12px;
-      color: #39ff14;
-      opacity: 0.6;
+      font-size: 13px;
+      font-weight: bold;
+      color: #333;
+      opacity: 0.5;
     }
   </style>
 </head>
 <body>
 
-  <div id="bg-blur"></div>
-  <canvas id="cache-canvas" class="wall-layer"></canvas>
-  <canvas id="live-canvas" class="wall-layer"></canvas>
-  <div id="conn-status">Connessione a Firebase...</div>
+  <canvas id="live-canvas"></canvas>
+  <div id="conn-status">Connected</div>
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-    import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-analytics.js";
-    import {
-      getDatabase, ref, onChildAdded, onChildRemoved,
-      query, orderByChild, limitToLast
-    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+    import { getDatabase, ref, onChildAdded, onChildRemoved } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
-    // ---- CONFIGURAZIONE FIREBASE ----
     const firebaseConfig = {
       apiKey: "AIzaSyCto1Pr0e-08sur96xlRPtxdQ5zrH0UdGk",
       authDomain: "drawing-toge.firebaseapp.com",
-      databaseURL: "https://drawing-toge-default-rtdb.europe-west1.firebasedatabase.app/", // es: https://drawing-toge-default-rtdb.europe-west1.firebasedatabase.app
-      projectId: "drawing-toge",
-      storageBucket: "drawing-toge.firebasestorage.app",
-      messagingSenderId: "519446510773",
-      appId: "1:519446510773:web:86387ee1644b60094152fc",
-      measurementId: "G-VBD2GWV4FD"
+      databaseURL: "https://drawing-toge-default-rtdb.europe-west1.firebasedatabase.app/",
+      projectId: "drawing-toge"
     };
 
     const app = initializeApp(firebaseConfig);
-    try { getAnalytics(app); } catch (e) { /* analytics non essenziale */ }
     const db = getDatabase(app);
 
-    const statusEl = document.getElementById("conn-status");
-
-    // Livelli canvas
-    const cacheCanvas = document.getElementById("cache-canvas");
-    const cacheCtx = cacheCanvas.getContext("2d", { alpha: true });
-
     const liveCanvas = document.getElementById("live-canvas");
-    const liveCtx = liveCanvas.getContext("2d", { alpha: true });
+    const ctx = liveCanvas.getContext("2d", { alpha: true });
 
-    let completedStrokes = []; // array ordinato, max 8, ognuno {key, color, size, style, points}
-    let activeStrokes = {};    // { strokeId: {color, size, style, points:[]} }
-    let activePointUnsubs = {}; // per staccare i listener dei punti quando lo stroke finisce
-    let totalStrokesCount = 0;
+    let activeStrokes = {};
+    let activePointUnsubs = {};
 
     function resize() {
-      cacheCanvas.width = liveCanvas.width = window.innerWidth;
-      cacheCanvas.height = liveCanvas.height = window.innerHeight;
-      redrawCache();
+      liveCanvas.width = window.innerWidth;
+      liveCanvas.height = window.innerHeight;
     }
     window.addEventListener("resize", resize);
     resize();
 
-    // ---------------- MOTORE GRAFICO (identico a prima) ----------------
-    function renderStroke(ctx, stroke, canvasW, canvasH) {
-      if (!stroke || !stroke.points || stroke.points.length === 0) return;
+    // Generatore pseudo-casuale per la grana stabile dello spray
+    function seededRandom(seedStr, i) {
+      let h = 0;
+      for (let k = 0; k < seedStr.length; k++) h += seedStr.charCodeAt(k) * (k + 1);
+      const x = Math.sin(h * 12.9898 + i * 78.233) * 43758.5453;
+      return x - Math.floor(x);
+    }
 
-      ctx.save();
-      const pts = stroke.points;
-      const color = stroke.color;
-      const size = stroke.size;
-      const style = stroke.style;
+    // ---------------- MOTORE GRAFICO OTTIMIZZATO (NIENTE LAG) ----------------
+    function drawFrame() {
+      ctx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
+      
+      const w = liveCanvas.width;
+      const h = liveCanvas.height;
 
-      ctx.strokeStyle = color;
-      ctx.fillStyle = color;
-      ctx.lineWidth = size;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
+      for (const id in activeStrokes) {
+        const stroke = activeStrokes[id];
+        const pts = stroke.points;
+        if (!pts || pts.length < 2) continue;
 
-      if (style === "liscio") {
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x * canvasW, pts[0].y * canvasH);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x * canvasW, pts[i].y * canvasH);
-        ctx.stroke();
-      }
-      else if (style === "blur") {
-        ctx.shadowBlur = size;
-        ctx.shadowColor = color;
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x * canvasW, pts[0].y * canvasH);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x * canvasW, pts[i].y * canvasH);
-        ctx.stroke();
-      }
-      else if (style === "acquerello") {
-        ctx.globalAlpha = 0.18;
-        for (let j = 0; j < 3; j++) {
-          ctx.lineWidth = size * (1 + j * 0.3);
+        ctx.save();
+
+        if (stroke.style === "pencil") {
+          // PENCIL: Linea super veloce e pulita
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          ctx.strokeStyle = stroke.color;
+          ctx.globalAlpha = 0.9;
+          ctx.lineWidth = stroke.size * 0.3;
           ctx.beginPath();
-          ctx.moveTo(pts[0].x * canvasW, pts[0].y * canvasH);
+          ctx.moveTo(pts[0].x * w, pts[0].y * h);
           for (let i = 1; i < pts.length; i++) {
-            ctx.lineTo(pts[i].x * canvasW + (Math.random() - 0.5) * 3, pts[i].y * canvasH + (Math.random() - 0.5) * 3);
+            ctx.lineTo(pts[i].x * w, pts[i].y * h);
           }
           ctx.stroke();
-        }
-      }
-      else if (style === "spray") {
-        ctx.lineWidth = size * 0.25;
-        ctx.globalAlpha = 0.3;
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x * canvasW, pts[0].y * canvasH);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x * canvasW, pts[i].y * canvasH);
-        ctx.stroke();
 
-        ctx.globalAlpha = 0.8;
-        for (const p of pts) {
-          const x = p.x * canvasW;
-          const y = p.y * canvasH;
-          const density = Math.round(5 + size * 0.15);
-          for (let i = 0; i < density; i++) {
-            const ang = Math.random() * Math.PI * 2;
-            const rad = Math.pow(Math.random(), 2) * (size * 0.4);
-            const px = x + Math.cos(ang) * rad;
-            const py = y + Math.sin(ang) * rad;
-            ctx.fillRect(px, py, 1.5, 1.5);
+        } else if (stroke.style === "watercolor") {
+  // ACQUERELLO LINEARE: Tratto continuo, frastagliato, zero cerchietti
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = stroke.size * 1.2;
+
+  // Estraiamo il colore
+  let hex = stroke.color.replace('#', '');
+  let r = parseInt(hex.substring(0, 2), 16);
+  let g = parseInt(hex.substring(2, 4), 16);
+  let b = parseInt(hex.substring(4, 6), 16);
+
+  // Per essere lineare e senza pallini, dobbiamo fare un unico percorso (beginPath)
+  // Per fare l'effetto sbiadito, disegneremo più strati o useremo un gradiente.
+  // Qui usiamo una tecnica "Layering" leggera: un unico tratto continuo.
+  
+  ctx.beginPath();
+  
+  // Applichiamo una leggera vibrazione "frastagliata" ai punti
+  for (let i = 0; i < pts.length; i++) {
+    // Aggiungiamo un leggero "disturbo" per l'effetto frastagliato (jitter)
+    const jitter = (seededRandom(id, i) - 0.5) * (stroke.size * 0.3);
+    const px = pts[i].x * w + jitter;
+    const py = pts[i].y * h + jitter;
+
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+
+  // Per lo sbiadimento (parte scuro -> chiara), disegniamo il tratto 
+  // con un'opacità media e un colore solido.
+  ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.5)`;
+  ctx.stroke();
+  
+  // Se vuoi l'effetto "consumo del colore" (che sbiadisce), 
+  // la soluzione più fluida è sovrapporre un leggero sfumato
+  // (Questo non crea cerchietti perché è un unico path)
+  ctx.globalAlpha = 0.3;
+  ctx.lineWidth = stroke.size * 1.8;
+  ctx.stroke();
+  ctx.globalAlpha = 1.0;
+
+        } else if (stroke.style === "spray") {
+          // SPRAY COMPATTO E COMPLETAMENTE GRANULOSO
+          ctx.fillStyle = stroke.color;
+          // Aumentiamo la densità: 25 granuli per punto rendono il tratto molto "pieno"
+          const grainsPerPoint = 145; 
+          
+          for (let i = 0; i < pts.length; i++) {
+            const px = pts[i].x * w;
+            const py = pts[i].y * h;
+
+            for (let g = 0; g < grainsPerPoint; g++) {
+              const idx = i * grainsPerPoint + g;
+              const angle = seededRandom(id, idx * 3) * Math.PI * 2;
+              
+              // RAGGIO RIDOTTO (stroke.size * 0.6): 
+              // Questo tiene i granuli vicini al dito, rendendo lo spray compatto.
+              const radius = seededRandom(id, idx * 7) * (stroke.size * 0.6);
+              
+              const gx = px + Math.cos(angle) * radius;
+              const gy = py + Math.sin(angle) * radius;
+
+              // Dimensioni granuli per dare realismo
+              const randomSelector = seededRandom(id, idx * 13);
+              const dotSize = randomSelector > 0.85 ? 3.0 : 1.5; 
+
+              // Alpha più alta per renderlo meno "fantasma" e più solido
+              ctx.globalAlpha = 0.8;
+              ctx.fillRect(gx, gy, dotSize, dotSize);
+            }
           }
         }
+        ctx.restore();
       }
-      ctx.restore();
+
+      requestAnimationFrame(drawFrame);
     }
+    requestAnimationFrame(drawFrame);
 
-    function redrawCache() {
-      cacheCtx.clearRect(0, 0, cacheCanvas.width, cacheCanvas.height);
-      for (const stroke of completedStrokes) {
-        renderStroke(cacheCtx, stroke, cacheCanvas.width, cacheCanvas.height);
-      }
-    }
-
-    function redrawLive() {
-      liveCtx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
-      for (const id in activeStrokes) {
-        renderStroke(liveCtx, activeStrokes[id], liveCanvas.width, liveCanvas.height);
-      }
-    }
-
-    function takeAutomaticScreenshot() {
-      const link = document.createElement("a");
-      link.download = `ricordo_evento_${totalStrokesCount}.png`;
-
-      const tempCanvas = document.createElement("canvas");
-      tempCanvas.width = cacheCanvas.width;
-      tempCanvas.height = cacheCanvas.height;
-      const tCtx = tempCanvas.getContext("2d");
-
-      tCtx.fillStyle = "#010810";
-      tCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-      tCtx.drawImage(cacheCanvas, 0, 0);
-      tCtx.drawImage(liveCanvas, 0, 0);
-
-      link.href = tempCanvas.toDataURL("image/png");
-      link.click();
-    }
-
-    // ---------------- LISTENER FIREBASE: STROKE ATTIVI (live, multi-utente) ----------------
+    // ---------------- REALTIME LISTENERS ----------------
     const activeRef = ref(db, "strokes/active");
 
     onChildAdded(activeRef, (snapshot) => {
@@ -210,55 +193,30 @@
         points: []
       };
 
-      // Ascolta i punti di QUESTO specifico stroke in tempo reale
       const pointsRef = ref(db, `strokes/active/${strokeId}/points`);
       const unsub = onChildAdded(pointsRef, (ptSnap) => {
         if (activeStrokes[strokeId]) {
           activeStrokes[strokeId].points.push(ptSnap.val());
-          redrawLive();
         }
       });
       activePointUnsubs[strokeId] = unsub;
     });
 
+    // MODIFICA QUI: Aggiungiamo il timer di 1.5 secondi
     onChildRemoved(activeRef, (snapshot) => {
       const strokeId = snapshot.key;
-      // Stacca il listener dei punti per evitare memory leak
+      
+      // Smettiamo di ascoltare i nuovi punti immediatamente
       if (activePointUnsubs[strokeId]) {
-        activePointUnsubs[strokeId](); // onChildAdded ritorna una funzione di unsubscribe
+        activePointUnsubs[strokeId]();
         delete activePointUnsubs[strokeId];
       }
-      delete activeStrokes[strokeId];
-      redrawLive();
+
+      // Invece di cancellarlo subito, aspettiamo 1.5 secondi
+      setTimeout(() => {
+        delete activeStrokes[strokeId];
+      }, 1500); 
     });
-
-    // ---------------- LISTENER FIREBASE: STROKE COMPLETATI (max 8, tutti gli schermi) ----------------
-    const completedQuery = query(ref(db, "strokes/completed"), orderByChild("timestamp"), limitToLast(8));
-    const seenKeys = new Set();
-
-    onChildAdded(completedQuery, (snapshot) => {
-      const key = snapshot.key;
-      if (seenKeys.has(key)) return;
-      seenKeys.add(key);
-
-      const data = snapshot.val();
-      completedStrokes.push({ key, ...data });
-      totalStrokesCount++;
-
-      if (completedStrokes.length > 8) {
-        const removed = completedStrokes.shift();
-        seenKeys.delete(removed.key);
-      }
-
-      redrawCache();
-
-      if (totalStrokesCount % 10 === 0) {
-        setTimeout(takeAutomaticScreenshot, 200);
-      }
-    });
-
-    statusEl.textContent = "Connesso a Firebase — in ascolto";
-    setTimeout(() => { statusEl.style.opacity = "0"; statusEl.style.transition = "opacity 1s"; }, 3000);
   </script>
 </body>
 </html>
