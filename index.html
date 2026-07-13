@@ -63,7 +63,7 @@
     window.addEventListener("resize", resize);
     resize();
 
-    // Generatore pseudo-casuale per la grana stabile dello spray
+    // Pseudo-random generator for stable spray grain patterns
     function seededRandom(seedStr, i) {
       let h = 0;
       for (let k = 0; k < seedStr.length; k++) h += seedStr.charCodeAt(k) * (k + 1);
@@ -71,7 +71,7 @@
       return x - Math.floor(x);
     }
 
-    // ---------------- MOTORE GRAFICO OTTIMIZZATO (NIENTE LAG) ----------------
+    // ---------------- OPTIMIZED DRAWING ENGINE (NO LAG) ----------------
     function drawFrame() {
       ctx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
       
@@ -86,7 +86,7 @@
         ctx.save();
 
         if (stroke.style === "pencil") {
-          // PENCIL: Linea super veloce e pulita
+          // PENCIL: fast, clean line
           ctx.lineCap = "round";
           ctx.lineJoin = "round";
           ctx.strokeStyle = stroke.color;
@@ -99,54 +99,119 @@
           }
           ctx.stroke();
 
-        } else if (stroke.style === "watercolor") {
-  // ACQUERELLO LINEARE: Tratto continuo, frastagliato, zero cerchietti
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.lineWidth = stroke.size * 1.2;
+        } else if (stroke.style === "drops") {
+          // PAINT DROPS: each point of the stroke is a drop that appears,
+          // expands softly, and then fades away over time.
+          const now = performance.now();
+          const life = 1400; // lifetime of each drop (ms)
 
-  // Estraiamo il colore
-  let hex = stroke.color.replace('#', '');
-  let r = parseInt(hex.substring(0, 2), 16);
-  let g = parseInt(hex.substring(2, 4), 16);
-  let b = parseInt(hex.substring(4, 6), 16);
+          for (let i = 0; i < pts.length; i++) {
+            const p = pts[i];
+            const age = now - (p._t || now);
+            if (age > life) continue;
 
-  // Per essere lineare e senza pallini, dobbiamo fare un unico percorso (beginPath)
-  // Per fare l'effetto sbiadito, disegneremo più strati o useremo un gradiente.
-  // Qui usiamo una tecnica "Layering" leggera: un unico tratto continuo.
-  
-  ctx.beginPath();
-  
-  // Applichiamo una leggera vibrazione "frastagliata" ai punti
-  for (let i = 0; i < pts.length; i++) {
-    // Aggiungiamo un leggero "disturbo" per l'effetto frastagliato (jitter)
-    const jitter = (seededRandom(id, i) - 0.5) * (stroke.size * 0.3);
-    const px = pts[i].x * w + jitter;
-    const py = pts[i].y * h + jitter;
+            const px = p.x * w;
+            const py = p.y * h;
 
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
+            const variance = 0.7 + seededRandom(id, i * 5) * 0.6; // 0.7 - 1.3
+            const maxRadius = stroke.size * variance;
 
-  // Per lo sbiadimento (parte scuro -> chiara), disegniamo il tratto 
-  // con un'opacità media e un colore solido.
-  ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.5)`;
-  ctx.stroke();
-  
-  // Se vuoi l'effetto "consumo del colore" (che sbiadisce), 
-  // la soluzione più fluida è sovrapporre un leggero sfumato
-  // (Questo non crea cerchietti perché è un unico path)
-  ctx.globalAlpha = 0.3;
-  ctx.lineWidth = stroke.size * 1.8;
-  ctx.stroke();
-  ctx.globalAlpha = 1.0;
+            let radius, alpha;
+            if (age < 350) {
+              // expansion phase (ease-out)
+              const t = age / 350;
+              radius = maxRadius * Math.sin((t * Math.PI) / 2);
+              alpha = 0.55;
+            } else {
+              // fade phase, with a slight residual "bleed"
+              const t = (age - 350) / (life - 350);
+              radius = maxRadius * (1 + t * 0.35);
+              alpha = 0.55 * (1 - t);
+            }
+
+            ctx.fillStyle = stroke.color;
+
+            // soft outer halo
+            ctx.globalAlpha = alpha * 0.35;
+            ctx.beginPath();
+            ctx.arc(px, py, radius * 1.4, 0, Math.PI * 2);
+            ctx.fill();
+
+            // drop body
+            ctx.globalAlpha = alpha;
+            ctx.beginPath();
+            ctx.arc(px, py, radius, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1.0;
+
+        } else if (stroke.style === "splat") {
+          // SPLAT: irregular, randomly-shaped paint splotches with small
+          // scattered droplets around them, fading away over time.
+          const now = performance.now();
+          const life = 1600; // lifetime of each splat (ms)
+
+          for (let i = 0; i < pts.length; i++) {
+            const p = pts[i];
+            const age = now - (p._t || now);
+            if (age > life) continue;
+
+            const px = p.x * w;
+            const py = p.y * h;
+
+            let scale, alpha;
+            if (age < 150) {
+              // quick pop-in
+              scale = age / 150;
+              alpha = 0.75;
+            } else {
+              scale = 1.0;
+              const t = (age - 150) / (life - 150);
+              alpha = 0.75 * (1 - t);
+            }
+            alpha = Math.max(alpha, 0);
+
+            const baseRadius = stroke.size * 0.7 * scale;
+
+            // irregular blob shape: vertices at randomized radii around the center
+            const vertices = 10;
+            ctx.fillStyle = stroke.color;
+            ctx.globalAlpha = alpha;
+            ctx.beginPath();
+            for (let k = 0; k <= vertices; k++) {
+              const angle = (k / vertices) * Math.PI * 2;
+              const rand = 0.55 + seededRandom(id, i * 31 + k * 7) * 0.9; // 0.55 - 1.45
+              const r = baseRadius * rand;
+              const vx = px + Math.cos(angle) * r;
+              const vy = py + Math.sin(angle) * r;
+              if (k === 0) ctx.moveTo(vx, vy);
+              else ctx.lineTo(vx, vy);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            // small scattered satellite droplets around the main splat
+            const satellites = 4;
+            for (let s = 0; s < satellites; s++) {
+              const seedIdx = i * 50 + s * 9;
+              const sAngle = seededRandom(id, seedIdx) * Math.PI * 2;
+              const sDist = baseRadius * (1.1 + seededRandom(id, seedIdx * 3) * 0.9);
+              const sRadius = baseRadius * (0.12 + seededRandom(id, seedIdx * 5) * 0.18);
+              const sx = px + Math.cos(sAngle) * sDist;
+              const sy = py + Math.sin(sAngle) * sDist;
+
+              ctx.beginPath();
+              ctx.arc(sx, sy, sRadius, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+          ctx.globalAlpha = 1.0;
 
         } else if (stroke.style === "spray") {
-          // SPRAY COMPATTO E COMPLETAMENTE GRANULOSO
+          // SPRAY: intense and clearly visible
           ctx.fillStyle = stroke.color;
-          // Aumentiamo la densità: 25 granuli per punto rendono il tratto molto "pieno"
-          const grainsPerPoint = 145; 
-          
+          const grainsPerPoint = 170;
+
           for (let i = 0; i < pts.length; i++) {
             const px = pts[i].x * w;
             const py = pts[i].y * h;
@@ -154,23 +219,24 @@
             for (let g = 0; g < grainsPerPoint; g++) {
               const idx = i * grainsPerPoint + g;
               const angle = seededRandom(id, idx * 3) * Math.PI * 2;
-              
-              // RAGGIO RIDOTTO (stroke.size * 0.6): 
-              // Questo tiene i granuli vicini al dito, rendendo lo spray compatto.
+
+              // REDUCED RADIUS (stroke.size * 0.6):
+              // keeps grains close to the finger, making the spray compact.
               const radius = seededRandom(id, idx * 7) * (stroke.size * 0.6);
-              
+
               const gx = px + Math.cos(angle) * radius;
               const gy = py + Math.sin(angle) * radius;
 
-              // Dimensioni granuli per dare realismo
+              // bigger, denser grains for a much more noticeable effect
               const randomSelector = seededRandom(id, idx * 13);
-              const dotSize = randomSelector > 0.85 ? 3.0 : 1.5; 
+              const dotSize = randomSelector > 0.8 ? 3.5 : 2.0;
 
-              // Alpha più alta per renderlo meno "fantasma" e più solido
-              ctx.globalAlpha = 0.8;
+              // near-full alpha for a solid, clearly visible result
+              ctx.globalAlpha = 0.95;
               ctx.fillRect(gx, gy, dotSize, dotSize);
             }
           }
+          ctx.globalAlpha = 1.0;
         }
         ctx.restore();
       }
@@ -196,23 +262,25 @@
       const pointsRef = ref(db, `strokes/active/${strokeId}/points`);
       const unsub = onChildAdded(pointsRef, (ptSnap) => {
         if (activeStrokes[strokeId]) {
-          activeStrokes[strokeId].points.push(ptSnap.val());
+          const val = ptSnap.val();
+          val._t = performance.now(); // local arrival timestamp, used to animate drops/splat
+          activeStrokes[strokeId].points.push(val);
         }
       });
       activePointUnsubs[strokeId] = unsub;
     });
 
-    // MODIFICA QUI: Aggiungiamo il timer di 1.5 secondi
+    // Add a 1.5s grace period before removing the stroke
     onChildRemoved(activeRef, (snapshot) => {
       const strokeId = snapshot.key;
       
-      // Smettiamo di ascoltare i nuovi punti immediatamente
+      // Stop listening for new points immediately
       if (activePointUnsubs[strokeId]) {
         activePointUnsubs[strokeId]();
         delete activePointUnsubs[strokeId];
       }
 
-      // Invece di cancellarlo subito, aspettiamo 1.5 secondi
+      // Instead of deleting right away, wait 1.5 seconds
       setTimeout(() => {
         delete activeStrokes[strokeId];
       }, 1500); 
